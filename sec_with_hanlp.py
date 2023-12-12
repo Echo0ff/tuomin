@@ -8,6 +8,8 @@ from PyQt5.QtCore import QThread, pyqtSignal, QObject
 from docx import Document
 import hanlp
 from hanlp.pretrained.ner import MSRA_NER_BERT_BASE_ZH
+from cryptography.fernet import Fernet
+
 
 hanlp_ner_model = hanlp.load(MSRA_NER_BERT_BASE_ZH)
 
@@ -82,7 +84,6 @@ class DesensitizeThread(QThread):
             entities = hanlp_ner_model(chunk)
             desensitized_chunk = chunk
             for entity in reversed(entities):
-                # print(entity)
                 entity_text, label, start, end = entity
                 if label in ['NS', 'NT', 'NR']:  # 
                     print(entity_text, label, start, end)
@@ -91,52 +92,11 @@ class DesensitizeThread(QThread):
                     if unit:
                         replacement = '**' + unit.group()
                         desensitized_chunk = desensitized_chunk[:start] + replacement + desensitized_chunk[end:]
-                        # if "社会主义" in desensitized_chunk:
-                        #     print(desensitized_chunk)
                     else:
                         desensitized_chunk = desensitized_chunk[:start] + '**' + desensitized_chunk[end:]
             return desensitized_chunk
         except Exception as e:
             return chunk
-    
-    # def _process_chunk(self, chunk):
-    #     try:
-            # 识别并标记签发单位
-            # ignored_ranges = [(m.start(), m.end()) for m in re.finditer(r'国务院|住房城乡建设部|财政部', chunk)]
-    #         # 添加规则以忽略书名号内的内容和紧跟着中文括号的书名号
-    #         ignored_ranges = [(m.start(), m.end()) for m in re.finditer(r'《.*?》(\（.*?\）)?', chunk)]
-
-    #         # 用于检查一个位置是否在忽略的范围内
-    #         def is_ignored_position(start, end):
-    #             for ignored_start, ignored_end in ignored_ranges:
-    #                 if start >= ignored_start and end <= ignored_end:
-    #                     return True
-    #             return False
-
-    #         # 原有的脱敏逻辑
-    #         chunk = re.sub(r'(编号)\d+|\w*公司', lambda m: '**公司' if '公司' in m.group() else m.group(1) + '**', chunk)
-    #         entities = hanlp_ner_model(chunk)
-    #         desensitized_chunk = chunk
-
-    #         for entity in reversed(entities):
-    #             entity_text, label, start, end = entity
-
-    #             # 如果实体在忽略范围内，则不进行脱敏处理
-    #             if is_ignored_position(start, end):
-    #                 continue
-
-    #             if label in ['NS', 'NT']:
-    #                 unit = re.search(r'(局|公司|工程|省|市|县|区|社区)$', entity_text)
-    #                 if unit:
-    #                     replacement = '**' + unit.group()
-    #                     desensitized_chunk = desensitized_chunk[:start] + replacement + desensitized_chunk[end:]
-    #                 else:
-    #                     desensitized_chunk = desensitized_chunk[:start] + '**' + desensitized_chunk[end:]
-            
-    #         return desensitized_chunk
-    #     except Exception as e:
-    #         print(e, chunk)
-    #         return chunk
 
 
     def stop(self):
@@ -190,6 +150,108 @@ def read_word_document(file_path):
 def write_to_text_file(file_path, content):
     with open(file_path, 'w', encoding='utf-8') as file:
         file.write(content)
+        
+class EncryptDesensitizeThread(QThread):
+    finished = pyqtSignal(str)
+    progress_updated = pyqtSignal(int)
+
+    def __init__(self, input_file_path, output_file_path, key):
+        super().__init__()
+        self.input_file_path = input_file_path
+        self.output_file_path = output_file_path
+        self.key = key
+        self._is_running = True
+
+    def run(self):
+        try:
+            file_paths = self._get_file_paths(self.input_file_path)
+            total_files = len(file_paths)
+            if total_files == 0:
+                raise FileNotFoundError("没有检测到.docx文件！")
+
+            fernet = Fernet(self.key)
+
+            for file_index, file_path in enumerate(file_paths):
+                if not self._is_running:
+                    break
+
+                # 读取、脱敏、二次脱敏
+                paragraphs = read_word_document(file_path)
+                desensitized_paragraphs = self.desensitize(paragraphs)
+                desensitized_text = self.secondary_desensitization('\n'.join(desensitized_paragraphs))
+                
+                # 加密
+                encrypted_text = fernet.encrypt(desensitized_text.encode()).decode()
+                self._save_encrypted_file(file_path, encrypted_text)
+                self._update_progress(file_index, total_files)
+
+            self.finished.emit("加密脱敏完成. 结果保存至: " + self.output_file_path)
+        except Exception as e:
+            self.finished.emit("Error: " + str(e))
+
+    def desensitize(self, paragraphs):
+        desensitized_paragraphs = []
+        for paragraph in paragraphs:
+            chunks = split_text(paragraph, max_length=126)
+            for chunk in chunks:
+                desensitized_chunk = self._process_chunk(chunk)
+                desensitized_paragraphs.append(desensitized_chunk)
+        return desensitized_paragraphs
+
+    def secondary_desensitization(self, content):
+        paragraphs = content.split('\n')
+        desensitized_paragraphs = []
+        for paragraph in paragraphs:
+            chunks = split_text(paragraph, max_length=126)
+            for chunk in chunks:
+                desensitized_chunk = self._process_chunk(chunk)
+                desensitized_paragraphs.append(desensitized_chunk)
+        return '\n'.join(desensitized_paragraphs)
+
+    def _get_file_paths(self, input_path):
+        if os.path.isfile(input_path):
+            return [input_path]
+        else:
+            return [os.path.join(input_path, f) for f in os.listdir(input_path) if f.endswith('.docx') and not f.startswith('~$')]
+
+    def _process_chunk(self, chunk):
+        try:
+            # 使用正则表达式进行初步脱敏
+            chunk = re.sub(r'(编号)\d+|\w*公司', lambda m: '**公司' if '公司' in m.group() else m.group(1) + '**', chunk)
+
+            # 使用HanLP进行实体识别
+            entities = hanlp_ner_model(chunk)
+            desensitized_chunk = chunk
+
+            # 遍历识别到的实体进行脱敏
+            for entity in reversed(entities):
+                entity_text, label, start, end = entity
+
+                if label in ['NS', 'NT', 'NR']:
+                    # 对于地名、机构名、人名进行脱敏
+                    desensitized_chunk = desensitized_chunk[:start] + '**' + desensitized_chunk[end:]
+                    unit = re.search(r'(局|公司|工程|省|市|县|区)$', entity_text)
+                    if unit:
+                        replacement = '**' + unit.group()
+                        desensitized_chunk = desensitized_chunk[:start] + replacement + desensitized_chunk[end:]
+                    else:
+                        desensitized_chunk = desensitized_chunk[:start] + '**' + desensitized_chunk[end:]
+
+            return desensitized_chunk
+
+        except Exception as e:
+            # 出现异常时返回原始数据块
+            print("Error processing chunk:", e)
+            return chunk
+
+    def _save_encrypted_file(self, original_file_path, encrypted_text):
+        new_file_name = ''.join(random.choices(string.ascii_letters + string.digits, k=8)) + '.enc'
+        output_file = os.path.join(self.output_file_path, new_file_name)
+        write_to_text_file(output_file, encrypted_text)
+
+    def _update_progress(self, current_index, total_files):
+        progress = int((current_index + 1) / total_files * 100)
+        self.progress_updated.emit(progress)
 
 
 class MyApp(QWidget):
@@ -227,9 +289,15 @@ class MyApp(QWidget):
         layout.addWidget(self.progress)
 
         btn_start = QPushButton('开始脱敏')
-        btn_stop = QPushButton('停止')
         layout.addWidget(btn_start)
+        
+        btn_start_encrypt = QPushButton('开始加密脱敏')
+        layout.addWidget(btn_start_encrypt)
+        
+        
+        btn_stop = QPushButton('停止')
         layout.addWidget(btn_stop)
+        
 
         self.log_text = QTextEdit()
         layout.addWidget(self.log_text)
@@ -239,6 +307,7 @@ class MyApp(QWidget):
         btn_upload.clicked.connect(self.upload)
         btn_select_output.clicked.connect(self.select_output)
         btn_start.clicked.connect(self.start_process)
+        btn_start_encrypt.clicked.connect(self.start_encrypt_process)
         btn_stop.clicked.connect(self.stop_process)
 
         # 文件路径
@@ -291,6 +360,34 @@ class MyApp(QWidget):
 
             self.desensitize_thread.start()
             self.log_text.append("开始脱敏处理。")
+            
+    def start_encrypt_process(self):
+        self.key = Fernet.generate_key()  # 生成密钥
+        key_file_path, _ = QFileDialog.getSaveFileName(self, '请选择密钥文件保存路径', '', 'Key File (*.key)')
+        if key_file_path:
+            with open(key_file_path, 'wb') as key_file:
+                key_file.write(self.key)
+            self.log_text.append(f"密钥已保存至: {key_file_path}")
+            self.begin_encryption()  # 保存密钥后开始加密脱敏
+        else:
+            self.log_text.append("未保存密钥。")
+
+    def begin_encryption(self):
+        if self.input_file_path and self.output_file_path:
+            self.encrypt_desensitize_thread = EncryptDesensitizeThread(self.input_file_path, self.output_file_path, self.key)
+            self.encrypt_desensitize_thread.progress_updated.connect(self.update_progress)
+            self.encrypt_desensitize_thread.finished.connect(self.process_finished)
+            self.encrypt_desensitize_thread.start()
+            self.log_text.append("开始加密脱敏处理。")
+            
+    def save_key(self, key):
+        key_file_path, _ = QFileDialog.getSaveFileName(self, '选择密钥保存路径', '', 'Key File (*.key)')
+        if key_file_path:
+            with open(key_file_path, 'wb') as key_file:
+                key_file.write(key)
+            self.log_text.append(f"密钥已保存至: {key_file_path}")
+        else:
+            self.log_text.append("未保存密钥。")
             
     def update_input_path(self, path):
         self.input1.setText(path)
