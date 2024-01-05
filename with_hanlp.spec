@@ -5,6 +5,7 @@ block_cipher = None
 
 datas = []
 datas += collect_data_files('hanlp')
+datas += copy_metadata('hanlp')
 datas += copy_metadata('tqdm')
 datas += copy_metadata('regex')
 datas += copy_metadata('requests')
@@ -22,7 +23,21 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=datas,
-    hiddenimports=collect_submodules('hanlp')+['tqdm']+['huggingface-hub']+['safetensors']+['pyyaml'],
+    hiddenimports=collect_submodules('hanlp')+['hanlp']+['tqdm']+['huggingface-hub']+['safetensors']+['pyyaml'],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=[],
+    noarchive=False,
+)
+
+
+a = Analysis(
+    ['with_hanlp.py'],
+    pathex=[],
+    binaries=[],
+    datas=[],
+    hiddenimports=[],
+    hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[],
@@ -33,32 +48,20 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
+    a.binaries,
+    a.datas,
     [],
-    exclude_binaries=True,
     name='with_hanlp',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
+    upx_exclude=[],
+    runtime_tmpdir=None,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-)
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.datas,
-    strip=False,
-    upx=True,
-    upx_exclude=[],
-    name='with_hanlp',
-)
-app = BUNDLE(
-    coll,
-    name='with_hanlp.app',
-    icon=None,
-    bundle_identifier=None,
 )

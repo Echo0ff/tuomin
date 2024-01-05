@@ -5,12 +5,23 @@ import random
 import string
 from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QLineEdit, QPushButton, QProgressBar, QTextEdit, QFileDialog
 from PyQt5.QtCore import QThread, pyqtSignal, QObject
+from pathlib import Path
+from PyPDF2 import PdfReader
+import pythoncom
+from win32com import client
 from docx import Document
 import hanlp
-from hanlp.pretrained.ner import MSRA_NER_BERT_BASE_ZH
 
-hanlp_ner_model = hanlp.load(MSRA_NER_BERT_BASE_ZH)
-# hanlp_ner_model = hanlp.load(r'ner\ner_bert_base_msra_20211227_114712')
+if getattr(sys, 'frozen', False):
+    application_path = sys._MEIPASS
+else:
+    application_path = os.path.dirname(os.path.abspath(__file__))
+
+huggingface_cache_path = os.path.join(application_path, 'huggingface')
+os.environ['TRANSFORMERS_CACHE'] = huggingface_cache_path
+
+model_path = os.path.join(application_path, 'ner_bert_base_msra_20211227_114712')
+hanlp_ner_model = hanlp.load(model_path)
 
 def split_text(text, max_length):
     sentences = re.split(r'(?<=[。，”“！？\?!])', text)
@@ -27,15 +38,78 @@ def split_text(text, max_length):
                 sub_chunks = [sentence[i:i+max_length] for i in range(0, len(sentence), max_length)]
                 chunks.extend(sub_chunks)
             else:
-                current_chunk = sentence  # 用新句子开始新的chunks
+                current_chunk = sentence
 
     if current_chunk:
         chunks.append(current_chunk)
 
     return chunks
 
+def read_pdf_document(file_path):
+    with open(file_path, 'rb') as file:
+        reader = PdfReader(file)
+        num_pages = len(reader.pages)
+        paras = [reader.pages[page].extract_text() + '\n' for page in range(num_pages)]
+        if not all(para.isspace() for para in paras):
+            return 'PDF文件为空'
+        else:
+            return paras
+        
 
-# 更新进度条
+# def read_doc_document(file_path):
+#     word = client.Dispatch("Word.Application")
+#     word.Visible = False  # Word应用程序在后台运行，不显示界面
+#     doc = word.Documents.Open(file_path)
+#     paragraphs = []
+#     print('正在处理doc文件，到这里了')
+#     temp_para = ''
+#     for para in doc.Paragraphs:
+#         if para.Range.Text.strip().isspace():
+#             continue
+#         temp_para += para.Range.Text.strip() + '\n'  # 使用'\n'来分隔每个段落
+#         if len(temp_para) > 126:
+#             paragraphs.append(temp_para)
+#             temp_para = ''
+#     if temp_para:  # 如果最后还有剩余的段落，也添加到列表中
+#         paragraphs.append(temp_para)
+#     doc.Close(False)
+#     word.Quit()
+#     print(paragraphs)
+#     return paragraphs
+
+def read_doc_document(file_path):
+    word = client.Dispatch("Word.Application")
+    word.Visible = False  # Word应用程序在后台运行，不显示界面
+    file_path = file_path.replace('/', '\\')
+    doc = word.Documents.Open(file_path)
+    print('daozhelile')
+    paragraphs = []
+    temp_para = ''
+    for para in doc.Paragraphs:
+        if para.Range.Text.strip().isspace():
+            continue
+        temp_para += para.Range.Text.strip() + '\n'  # 使用'\n'来分隔每个段落
+        if len(temp_para) > 126:
+            paragraphs.append(temp_para)
+            temp_para = ''
+    if temp_para:  # 如果最后还有剩余的段落，也添加到列表中
+        paragraphs.append(temp_para)
+    doc.Close(False)
+    word.Quit()
+    return paragraphs
+
+
+#检查文件格式并且返回段落文本
+def read_file_context(file_path):
+    if file_path.endswith('.docx'):
+        paragraphs = read_word_document(file_path)
+    elif file_path.endswith('.pdf'):
+        paragraphs = read_pdf_document(file_path)
+    elif file_path.endswith('.doc'):
+        print('正在处理doc文件')
+        paragraphs = read_doc_document(file_path)
+    return paragraphs
+
 class ProgressSignal(QObject):
     progress_updated = pyqtSignal(int)
 
@@ -54,101 +128,82 @@ class DesensitizeThread(QThread):
             file_paths = self._get_file_paths(self.input_file_path)
             total_files = len(file_paths)
             if total_files == 0:
-                raise FileNotFoundError("没有检测到.docx文件！")
+                raise FileNotFoundError("没有检测到可以于脱敏的文件！")
 
             for file_index, file_path in enumerate(file_paths):
+                print("检索文件路径", file_path)
                 if not self._is_running:
-                    break
-
-                paragraphs = read_word_document(file_path)
+                    self._clean_up_and_exit()  # 清理并退出线程
+                    return
+                try:
+                    paragraphs = read_file_context(file_path)
+                    if paragraphs == 'PDF文件为空':
+                        continue
+                except Exception as e:
+                    continue
                 desensitized_paragraphs = []
-
+                print(f'正在脱敏文件：{file_path}')
                 for paragraph in paragraphs:
+                    if not self._is_running:
+                        self._clean_up_and_exit()  # 清理并退出线程
+                        return
                     chunks = split_text(paragraph, max_length=126)
                     for chunk in chunks:
                         desensitized_chunk = self._process_chunk(chunk)
+                        #执行2次脱敏
+                        desensitized_chunk = self._process_chunk(desensitized_chunk)
                         desensitized_paragraphs.append(desensitized_chunk)
 
-                desensitized_text = '\n'.join(desensitized_paragraphs)
+                desensitized_text = ''.join(desensitized_paragraphs)
                 self._save_desensitized_file(file_path, desensitized_text)
                 self._update_progress(file_index, total_files)
+                
+                if not self._is_running:
+                    self._clean_up_and_exit()  # 清理并退出线程
+                    return
 
             self.finished.emit("脱敏完成. 结果保存至: " + self.output_file_path)
         except Exception as e:
             self.finished.emit("Error: " + str(e))
-            
+
     def _process_chunk(self, chunk):
         try:
-            chunk = re.sub(r'(编号)\d+|\w*公司', lambda m: '**公司' if '公司' in m.group() else m.group(1) + '**', chunk)
+            chunk = re.sub(r'(编号)\d+|\w*公司', lambda m: '*公司' if '公司' in m.group() else m.group(1) + '*', chunk)
             entities = hanlp_ner_model(chunk)
             desensitized_chunk = chunk
             for entity in reversed(entities):
-                # print(entity)
                 entity_text, label, start, end = entity
                 if label in ['NS', 'NT', 'NR']:
-                    
-                    # print(entity_text, label, start, end)
-                    desensitized_chunk = desensitized_chunk[:start] + '**' + desensitized_chunk[end:]
-                    unit = re.search(r'(局|公司|工程|省|市|县|区)$', entity_text)
+                    unit = re.search(r'(局|公司|工程|省|市|县|区|社区)$', entity_text)
                     if unit:
-                        replacement = '**' + unit.group()
+                        replacement = '*' + unit.group()
                         desensitized_chunk = desensitized_chunk[:start] + replacement + desensitized_chunk[end:]
-                        # if "社会主义" in desensitized_chunk:
-                        #     print(desensitized_chunk)
                     else:
-                        desensitized_chunk = desensitized_chunk[:start] + '**' + desensitized_chunk[end:]
+                        desensitized_chunk = desensitized_chunk[:start] + '*' + desensitized_chunk[end:]
             return desensitized_chunk
         except Exception as e:
             return chunk
-    
-    # def _process_chunk(self, chunk):
-    #     try:
-            # 识别并标记签发单位
-            # ignored_ranges = [(m.start(), m.end()) for m in re.finditer(r'国务院|住房城乡建设部|财政部', chunk)]
-    #         # 添加规则以忽略书名号内的内容和紧跟着中文括号的书名号
-    #         ignored_ranges = [(m.start(), m.end()) for m in re.finditer(r'《.*?》(\（.*?\）)?', chunk)]
-
-    #         # 用于检查一个位置是否在忽略的范围内
-    #         def is_ignored_position(start, end):
-    #             for ignored_start, ignored_end in ignored_ranges:
-    #                 if start >= ignored_start and end <= ignored_end:
-    #                     return True
-    #             return False
-
-    #         # 原有的脱敏逻辑
-    #         chunk = re.sub(r'(编号)\d+|\w*公司', lambda m: '**公司' if '公司' in m.group() else m.group(1) + '**', chunk)
-    #         entities = hanlp_ner_model(chunk)
-    #         desensitized_chunk = chunk
-
-    #         for entity in reversed(entities):
-    #             entity_text, label, start, end = entity
-
-    #             # 如果实体在忽略范围内，则不进行脱敏处理
-    #             if is_ignored_position(start, end):
-    #                 continue
-
-    #             if label in ['NS', 'NT']:
-    #                 unit = re.search(r'(局|公司|工程|省|市|县|区|社区)$', entity_text)
-    #                 if unit:
-    #                     replacement = '**' + unit.group()
-    #                     desensitized_chunk = desensitized_chunk[:start] + replacement + desensitized_chunk[end:]
-    #                 else:
-    #                     desensitized_chunk = desensitized_chunk[:start] + '**' + desensitized_chunk[end:]
-            
-    #         return desensitized_chunk
-    #     except Exception as e:
-    #         print(e, chunk)
-    #         return chunk
-
 
     def stop(self):
         self._is_running = False
 
+    def _clean_up_and_exit(self):
+        if hasattr(self, 'file'):
+            self.file.close()
+            del self.file
+        self.finished.emit("任务已停止。")
+
     def _get_file_paths(self, input_path):
-        if os.path.isfile(input_path):
-            return [input_path]
-        else:
-            return [os.path.join(input_path, f) for f in os.listdir(input_path) if f.endswith('.docx') and not f.startswith('~$')]
+        file_paths = []
+        for root, dirs, files in os.walk(input_path):
+            for file in files:
+                if file.lower().endswith(('doc', 'docx', 'pdf')) and not file.startswith('~$'):
+                    file_path = os.path.join(root, file)
+                    file_path = file_path.replace('\\', '/')  # 替换斜杠
+                    file_paths.append(file_path)
+        print(file_paths)
+        return file_paths
+
 
 
     def _save_desensitized_file(self, original_file_path, desensitized_text):
@@ -160,17 +215,13 @@ class DesensitizeThread(QThread):
         progress = int((current_index + 1) / total_files * 100)
         self.progress_updated.emit(progress)
 
-
-# 读取Word
 def read_word_document(file_path):
     doc = Document(file_path)
-    return [para.text for para in doc.paragraphs]
+    return [para.text + '\n' for para in doc.paragraphs]
 
-# 写入
 def write_to_text_file(file_path, content):
     with open(file_path, 'w', encoding='utf-8') as file:
         file.write(content)
-
 
 class MyApp(QWidget):
     
@@ -183,10 +234,9 @@ class MyApp(QWidget):
         self.trigger_select_input_file.connect(self.update_input_path)
         self.trigger_select_output_file.connect(self.update_output_path)
 
-        # 创建垂直布局
         layout = QVBoxLayout()
         
-        label1 = QLabel('请在转换之前将doc格式的文件转换为docx')
+        label1 = QLabel('目前可以脱敏的文件类型有：docx, doc, pdf')
         layout.addWidget(label1)
 
         self.input1 = QLineEdit()
@@ -221,7 +271,6 @@ class MyApp(QWidget):
         btn_start.clicked.connect(self.start_process)
         btn_stop.clicked.connect(self.stop_process)
 
-        # 文件路径
         self.input_file_path = ''
         self.output_file_path = ''
         
@@ -230,26 +279,18 @@ class MyApp(QWidget):
 
         if file_path:
             self.log_text.append(f"已选择文件夹：{file_path}")
-            docx_files = [os.path.join(file_path, f) for f in os.listdir(file_path) if f.endswith('.docx') and not f.startswith('~$')]
+            docx_files = [os.path.join(root, f) 
+                        for root, dirs, files in os.walk(file_path) 
+                        for f in files if f.lower().endswith(('.docx', '.pdf', '.doc')) and not f.startswith('~$')]
             if docx_files:
-                self.input_file_path = file_path  # 保存选择的文件夹路径
+                self.input_file_path = file_path
                 self.input1.setText(file_path)
-                self.log_text.append("文件夹内的docx文件有：\n" + "\n".join(docx_files))
+                self.log_text.append("文件夹内可以脱敏的文件有：" + str(len(docx_files)) + "个 \n" + "\n".join(docx_files))
             else:
                 self.log_text.append("选择的文件夹内没有docx文件。")
         else:
             self.log_text.append("未选择文件夹。")
 
-
-    def select_input_file(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, '选择文件', '', 'Word 文档 (*.docx)')
-        if file_path:
-            self.trigger_select_input_file.emit(file_path)
-
-    def select_output_file(self):
-        file_path = QFileDialog.getSaveFileName(self, '选择输出文件', '', '文本文件 (*.txt)')[0]
-        if file_path:
-            self.trigger_select_output_file.emit(file_path)
 
     def select_output(self):
         file_path = QFileDialog.getExistingDirectory(self, '选择输出文件夹')
@@ -263,9 +304,8 @@ class MyApp(QWidget):
     
     def start_process(self):
         if self.input_file_path and self.output_file_path:
-            # 创建线程
             self.desensitize_thread = DesensitizeThread(self.input_file_path, self.output_file_path)
-
+            
             self.desensitize_thread.progress_updated.connect(self.update_progress)
             self.desensitize_thread.finished.connect(self.process_finished)
 
@@ -296,4 +336,4 @@ if __name__ == '__main__':
     ex = MyApp()
     ex.show()
     sys.exit(app.exec_())
-    
+

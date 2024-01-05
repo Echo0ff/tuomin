@@ -7,9 +7,22 @@ from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QLineEdi
 from PyQt5.QtCore import QThread, pyqtSignal, QObject
 from docx import Document
 import hanlp
-from hanlp.pretrained.ner import MSRA_NER_BERT_BASE_ZH
+# from hanlp.pretrained.ner import MSRA_NER_BERT_BASE_ZH
 
-hanlp_ner_model = hanlp.load(MSRA_NER_BERT_BASE_ZH)
+
+if getattr(sys, 'frozen', False):
+    application_path = sys._MEIPASS
+# 如果是开发时，使用当前工作目录
+else:
+    application_path = os.path.dirname(os.path.abspath(__file__))
+
+huggingface_cache_path = os.path.join(application_path, 'huggingface')
+os.environ['TRANSFORMERS_CACHE'] = huggingface_cache_path
+print(os.environ['TRANSFORMERS_CACHE'])
+
+model_path = os.path.join(application_path, 'ner_bert_base_msra_20211227_114712')
+hanlp_ner_model = hanlp.load(model_path)
+# hanlp_ner_model = hanlp.load(MSRA_NER_BERT_BASE_ZH)
 
 def split_text(text, max_length):
     sentences = re.split(r'(?<=[。，”“！？\?!])', text)
@@ -81,10 +94,9 @@ class DesensitizeThread(QThread):
             chunk = re.sub(r'(编号)\d+|\w*公司', lambda m: '**公司' if '公司' in m.group() else m.group(1) + '**', chunk)
             entities = hanlp_ner_model(chunk)
             desensitized_chunk = chunk
-            print(chunk)
             for entity in reversed(entities):
                 entity_text, label, start, end = entity
-                if label in ['NS', 'NT']:  # 暂时只发现了两类
+                if label in ['NS', 'NT', 'NR']:  # 暂时只发现了两类
                     unit = re.search(r'(局|公司|工程|省|市|县|区|社区)$', entity_text)
                     if unit:
                         replacement = '**' + unit.group()

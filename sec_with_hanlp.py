@@ -8,7 +8,6 @@ from PyQt5.QtCore import QThread, pyqtSignal, QObject
 from docx import Document
 import hanlp
 from hanlp.pretrained.ner import MSRA_NER_BERT_BASE_ZH
-from cryptography.fernet import Fernet
 
 
 hanlp_ner_model = hanlp.load(MSRA_NER_BERT_BASE_ZH)
