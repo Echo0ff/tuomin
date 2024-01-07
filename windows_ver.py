@@ -50,39 +50,20 @@ def read_pdf_document(file_path):
         reader = PdfReader(file)
         num_pages = len(reader.pages)
         paras = [reader.pages[page].extract_text() + '\n' for page in range(num_pages)]
-        if not all(para.isspace() for para in paras):
+        if all(para.isspace() for para in paras):
             return 'PDF文件为空'
         else:
             return paras
         
-
-# def read_doc_document(file_path):
-#     word = client.Dispatch("Word.Application")
-#     word.Visible = False  # Word应用程序在后台运行，不显示界面
-#     doc = word.Documents.Open(file_path)
-#     paragraphs = []
-#     print('正在处理doc文件，到这里了')
-#     temp_para = ''
-#     for para in doc.Paragraphs:
-#         if para.Range.Text.strip().isspace():
-#             continue
-#         temp_para += para.Range.Text.strip() + '\n'  # 使用'\n'来分隔每个段落
-#         if len(temp_para) > 126:
-#             paragraphs.append(temp_para)
-#             temp_para = ''
-#     if temp_para:  # 如果最后还有剩余的段落，也添加到列表中
-#         paragraphs.append(temp_para)
-#     doc.Close(False)
-#     word.Quit()
-#     print(paragraphs)
-#     return paragraphs
+def deal_path(path):
+    path = path.replace('\\', '/')
+    return path 
 
 def read_doc_document(file_path):
     word = client.Dispatch("Word.Application")
     word.Visible = False  # Word应用程序在后台运行，不显示界面
     file_path = file_path.replace('/', '\\')
     doc = word.Documents.Open(file_path)
-    print('daozhelile')
     paragraphs = []
     temp_para = ''
     for para in doc.Paragraphs:
@@ -131,7 +112,7 @@ class DesensitizeThread(QThread):
                 raise FileNotFoundError("没有检测到可以于脱敏的文件！")
 
             for file_index, file_path in enumerate(file_paths):
-                print("检索文件路径", file_path)
+                file_path = deal_path(file_path)
                 if not self._is_running:
                     self._clean_up_and_exit()  # 清理并退出线程
                     return
@@ -197,17 +178,15 @@ class DesensitizeThread(QThread):
         file_paths = []
         for root, dirs, files in os.walk(input_path):
             for file in files:
-                if file.lower().endswith(('doc', 'docx', 'pdf')) and not file.startswith('~$'):
+                if file.lower().endswith(('doc', 'docx', 'pdf')) and not file.startswith('~$') and not file.startswith('.'):
                     file_path = os.path.join(root, file)
-                    file_path = file_path.replace('\\', '/')  # 替换斜杠
                     file_paths.append(file_path)
-        print(file_paths)
         return file_paths
 
 
 
     def _save_desensitized_file(self, original_file_path, desensitized_text):
-        new_file_name = ''.join(random.choices(string.ascii_letters + string.digits, k=8)) + '.txt'
+        new_file_name = ''.join(random.choices(string.ascii_letters + string.digits, k=8)) + '_' + os.path.basename(original_file_path) + '.txt'
         output_file = os.path.join(self.output_file_path, new_file_name)
         write_to_text_file(output_file, desensitized_text)
 
@@ -281,7 +260,7 @@ class MyApp(QWidget):
             self.log_text.append(f"已选择文件夹：{file_path}")
             docx_files = [os.path.join(root, f) 
                         for root, dirs, files in os.walk(file_path) 
-                        for f in files if f.lower().endswith(('.docx', '.pdf', '.doc')) and not f.startswith('~$')]
+                        for f in files if f.lower().endswith(('.docx', '.pdf', '.doc')) and not f.startswith('~$') and not f.startswith('.')]
             if docx_files:
                 self.input_file_path = file_path
                 self.input1.setText(file_path)
